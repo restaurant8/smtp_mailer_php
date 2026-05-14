@@ -25,6 +25,17 @@ function worker_heartbeat(string $state = 'idle', ?int $queueId = null, ?string 
     }
 }
 
+function heartbeat_sleep(int $seconds, string $state = 'waiting', ?int $queueId = null, ?string $email = null): void
+{
+    $remaining = max(1, $seconds);
+    while ($remaining > 0) {
+        worker_heartbeat($state, $queueId, $email);
+        $chunk = min(5, $remaining);
+        sleep($chunk);
+        $remaining -= $chunk;
+    }
+}
+
 worker_log('worker started');
 worker_heartbeat('started');
 
@@ -50,8 +61,7 @@ while (true) {
 
         if (!$item) {
             $pdo->commit();
-            worker_heartbeat('idle');
-            sleep(5);
+            heartbeat_sleep(5, 'idle');
             continue;
         }
 
@@ -106,10 +116,9 @@ while (true) {
                 ->execute([$item['campaign_id']]);
         }
 
-        sleep(max(1, (int) $item['interval_seconds']));
+        heartbeat_sleep(max(1, (int) $item['interval_seconds']), 'waiting', (int) $item['id'], $item['email']);
     } catch (Throwable $error) {
-        worker_heartbeat('error');
         worker_log('worker error: ' . $error->getMessage());
-        sleep(10);
+        heartbeat_sleep(10, 'error');
     }
 }
