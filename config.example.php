@@ -19,6 +19,11 @@ return [
         'username' => 'your-account@example.com',
         'password' => 'your-smtp-password',
         'encryption' => 'tls', // tls, ssl, or empty string
+        'timeout' => 30,
+        'auto_tls' => true,
+        'debug' => false,
+        'debug_log' => __DIR__ . '/storage/logs/smtp-debug.log',
+        'allow_self_signed' => false,
         'from_email' => 'your-account@example.com',
         'from_name' => 'Your Company',
         'reply_to' => 'support@example.com',

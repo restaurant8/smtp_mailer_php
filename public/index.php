@@ -11,6 +11,17 @@ function post_value(string $key, string $default = ''): string
     return trim((string) ($_POST[$key] ?? $default));
 }
 
+function uploaded_text(string $field): string
+{
+    if (!isset($_FILES[$field]) || ($_FILES[$field]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return '';
+    }
+    if ($_FILES[$field]['error'] !== UPLOAD_ERR_OK) {
+        return '';
+    }
+    return (string) file_get_contents($_FILES[$field]['tmp_name']);
+}
+
 function query_rows(PDO $pdo, string $sql, array $params = []): array
 {
     $stmt = $pdo->prepare($sql);
@@ -111,12 +122,12 @@ if ($path === '/api/status') {
     $campaignId = isset($_GET['campaign_id']) && $_GET['campaign_id'] !== '' ? (int) $_GET['campaign_id'] : null;
     $stats = queue_stats($pdo);
     $worker = worker_info($pdo);
-    $campaigns = query_rows($pdo, "select c.id, c.name, c.status, c.interval_seconds,
+    $campaigns = query_rows($pdo, "select c.id, c.name, c.status, c.interval_seconds, coalesce(l.name, '-') as list_name,
         (select count(*) from send_queue q where q.campaign_id = c.id) as total,
         (select count(*) from send_queue q where q.campaign_id = c.id and q.status = 'sent') as sent,
         (select count(*) from send_queue q where q.campaign_id = c.id and q.status = 'failed') as failed,
         (select count(*) from send_queue q where q.campaign_id = c.id and q.status in ('queued','processing')) as pending
-        from campaigns c order by c.id desc limit 10");
+        from campaigns c left join contact_lists l on l.id = c.list_id order by c.id desc limit 20");
 
     $params = [];
     $where = '';
@@ -140,24 +151,65 @@ if ($path === '/api/status') {
 }
 
 if ($path === '/contacts/import' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $contacts = parse_contacts(post_value('contacts'));
+    $rawContacts = uploaded_text('contacts_file');
+    if ($rawContacts === '') {
+        $rawContacts = post_value('contacts');
+    }
+    $contacts = parse_contacts($rawContacts);
+    if (!$contacts) {
+        redirect_with_notice('/contacts', '请上传 txt/csv 名单文件，或粘贴至少一个邮箱');
+    }
+
+    $listName = post_value('list_name');
+    if ($listName === '') {
+        $listName = '名单 ' . date('Y-m-d H:i:s');
+    }
     $source = post_value('source', 'manual');
+    $filename = isset($_FILES['contacts_file']) && ($_FILES['contacts_file']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK
+        ? basename((string) $_FILES['contacts_file']['name'])
+        : '';
     $imported = 0;
     $skipped = 0;
-    $stmt = $pdo->prepare('insert into contacts (email, name, company, source, vars_json) values (?, ?, ?, ?, ?)');
+
+    $pdo->beginTransaction();
+    $pdo->prepare('insert into contact_lists (name, source, filename, total_count) values (?, ?, ?, 0)')
+        ->execute([$listName, $source, $filename]);
+    $listId = (int) $pdo->lastInsertId();
+
+    $upsertContact = $pdo->prepare(
+        'insert into contacts (email, name, company, source, vars_json) values (?, ?, ?, ?, ?)
+         on duplicate key update
+           name = if(values(name) = "", name, values(name)),
+           company = if(values(company) = "", company, values(company)),
+           source = values(source),
+           vars_json = values(vars_json)'
+    );
+    $findContact = $pdo->prepare('select id from contacts where email = ?');
+    $linkContact = $pdo->prepare('insert ignore into contact_list_items (list_id, contact_id) values (?, ?)');
+
     foreach ($contacts as $contact) {
         if (!filter_var($contact['email'], FILTER_VALIDATE_EMAIL)) {
             $skipped++;
             continue;
         }
         try {
-            $stmt->execute([$contact['email'], $contact['name'], $contact['company'], $source, $contact['vars_json']]);
-            $imported++;
+            $upsertContact->execute([$contact['email'], $contact['name'], $contact['company'], $source, $contact['vars_json']]);
+            $findContact->execute([$contact['email']]);
+            $contactId = (int) $findContact->fetchColumn();
+            $linkContact->execute([$listId, $contactId]);
+            if ($linkContact->rowCount() > 0) {
+                $imported++;
+            } else {
+                $skipped++;
+            }
         } catch (Throwable) {
             $skipped++;
         }
     }
-    redirect_with_notice('/contacts', "已导入 {$imported} 个联系人，跳过 {$skipped} 条");
+
+    $pdo->prepare('update contact_lists set total_count = ? where id = ?')->execute([$imported, $listId]);
+    $pdo->commit();
+    redirect_with_notice('/contacts', "名单已创建：{$listName}，导入 {$imported} 个邮箱，跳过 {$skipped} 条");
 }
 
 if ($path === '/templates' && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -166,14 +218,41 @@ if ($path === '/templates' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     redirect_with_notice('/templates', '模板已保存');
 }
 
+if (preg_match('#^/contact-lists/(\d+)/delete$#', $path, $matches) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $listId = (int) $matches[1];
+    $inUse = $pdo->prepare("select count(*) from campaigns where list_id = ? and status in ('queued','sending')");
+    $inUse->execute([$listId]);
+    if ((int) $inUse->fetchColumn() > 0) {
+        redirect_with_notice('/contacts', '这个名单正在发送中，不能删除');
+    }
+    $pdo->prepare('delete from contact_lists where id = ?')->execute([$listId]);
+    redirect_with_notice('/contacts', '名单已删除');
+}
+
 if ($path === '/campaigns' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $templateId = (int) post_value('template_id');
+    $listId = (int) post_value('list_id');
     $interval = max(1, (int) post_value('interval_seconds', '60'));
+    if ($listId <= 0) {
+        redirect_with_notice('/campaigns', '请选择一个联系人名单');
+    }
+    $contacts = query_rows(
+        $pdo,
+        "select c.id, c.email
+         from contact_list_items i
+         join contacts c on c.id = i.contact_id
+         where i.list_id = ? and c.email not in (select email from suppressions)
+         order by i.created_at, c.id",
+        [$listId]
+    );
+    if (!$contacts) {
+        redirect_with_notice('/contacts', '这个名单没有可发送联系人，请先上传新的 txt/csv 名单');
+    }
+
     $pdo->beginTransaction();
-    $stmt = $pdo->prepare("insert into campaigns (template_id, name, interval_seconds, status) values (?, ?, ?, 'queued')");
-    $stmt->execute([$templateId, post_value('name', '未命名活动'), $interval]);
+    $stmt = $pdo->prepare("insert into campaigns (template_id, list_id, name, interval_seconds, status) values (?, ?, ?, ?, 'queued')");
+    $stmt->execute([$templateId, $listId, post_value('name', '未命名活动'), $interval]);
     $campaignId = (int) $pdo->lastInsertId();
-    $contacts = $pdo->query("select id, email from contacts where email not in (select email from suppressions) order by id")->fetchAll();
     $queue = $pdo->prepare("insert into send_queue (campaign_id, contact_id, email, status) values (?, ?, ?, 'queued')");
     foreach ($contacts as $contact) {
         $queue->execute([$campaignId, $contact['id'], $contact['email']]);
@@ -186,6 +265,22 @@ if (preg_match('#^/campaigns/(\d+)/stop$#', $path, $matches) && $_SERVER['REQUES
     $stmt = $pdo->prepare("update campaigns set status = 'stopped', finished_at = now() where id = ?");
     $stmt->execute([(int) $matches[1]]);
     redirect_with_notice('/campaigns', '活动已停止');
+}
+
+if (preg_match('#^/campaigns/(\d+)/delete$#', $path, $matches) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $campaignId = (int) $matches[1];
+    $status = $pdo->prepare('select status from campaigns where id = ?');
+    $status->execute([$campaignId]);
+    $campaignStatus = $status->fetchColumn();
+    if (!in_array($campaignStatus, ['done', 'stopped'], true)) {
+        redirect_with_notice('/campaigns', '只能删除已完成或已停止的活动');
+    }
+
+    $pdo->beginTransaction();
+    $pdo->prepare('delete from send_queue where campaign_id = ?')->execute([$campaignId]);
+    $pdo->prepare('delete from campaigns where id = ?')->execute([$campaignId]);
+    $pdo->commit();
+    redirect_with_notice('/campaigns', '活动和对应发送日志已删除');
 }
 
 if ($path === '/unsubscribe') {
@@ -220,8 +315,8 @@ if ($path === '/') {
           </tbody></table>
         </section>
         <section style="margin-top:16px">
-          <h2>发送活动进度</h2>
-          <table><thead><tr><th>活动</th><th>状态</th><th>间隔</th><th>进度</th><th>失败</th></tr></thead><tbody id="campaign-body"></tbody></table>
+          <h2>最近 20 个发送活动</h2>
+          <table><thead><tr><th>活动</th><th>名单</th><th>状态</th><th>间隔</th><th>进度</th><th>失败</th></tr></thead><tbody id="campaign-body"></tbody></table>
         </section>
         <section style="margin-top:16px">
           <h2>最近发送日志</h2>
@@ -233,18 +328,21 @@ if ($path === '/') {
 }
 
 if ($path === '/contacts') {
-    $rows = $pdo->query('select * from contacts order by id desc limit 100')->fetchAll();
-    $bodyRows = '';
-    foreach ($rows as $row) {
-        $bodyRows .= '<tr><td>' . e($row['email']) . '</td><td>' . e($row['name']) . '</td><td>' . e($row['company']) . '</td><td>' . e($row['source']) . '</td></tr>';
+    $lists = $pdo->query("select l.*,
+        (select count(*) from campaigns c where c.list_id = l.id) as campaign_count
+        from contact_lists l order by l.id desc limit 100")->fetchAll();
+    $listRows = '';
+    foreach ($lists as $list) {
+        $listRows .= '<tr><td>#' . e($list['id']) . ' ' . e($list['name']) . '</td><td>' . e((string) $list['total_count']) . '</td><td>' . e($list['filename']) . '</td><td>' . e($list['created_at']) . '</td><td>' . e((string) $list['campaign_count']) . '</td><td><form method="post" action="/contact-lists/' . e($list['id']) . '/delete" onsubmit="return confirm(\'确定删除这个名单？不会删除历史发送日志。\')"><button class="secondary" style="background:#b42318">删除名单</button></form></td></tr>';
     }
-    render_page('联系人', '<div class="split"><section><h2>批量导入</h2><form method="post" action="/contacts/import">
-        <label>来源备注<input name="source" placeholder="例如：2026-05 客户名单"></label>
-        <label>选择 CSV 文件<input id="contact-file" type="file" accept=".csv,.txt,text/csv,text/plain"></label>
-        <label>邮箱列表或 CSV<textarea name="contacts" placeholder="email,name,company&#10;alice@example.com,Alice,Example Inc"></textarea></label>
-        <button type="submit">导入联系人</button></form>
-        <script>document.getElementById("contact-file").addEventListener("change",async(e)=>{const f=e.target.files[0];if(f)document.querySelector("textarea[name=contacts]").value=await f.text();});</script>
-        </section><section><h2>最近联系人</h2><table><thead><tr><th>邮箱</th><th>名称</th><th>公司</th><th>来源</th></tr></thead><tbody>' . ($bodyRows ?: '<tr><td colspan="4" class="muted">暂无联系人</td></tr>') . '</tbody></table></section></div>');
+    render_page('联系人名单', '<div class="split"><section><h2>上传名单</h2><form method="post" action="/contacts/import" enctype="multipart/form-data">
+        <label>名单名称<input name="list_name" placeholder="例如：5月第一批客户" required></label>
+        <label>来源备注<input name="source" placeholder="例如：官网注册用户"></label>
+        <label>上传 txt/csv 文件<input name="contacts_file" type="file" accept=".csv,.txt,text/csv,text/plain"></label>
+        <label>也可以粘贴邮箱列表或 CSV<textarea name="contacts" placeholder="email,name,company&#10;alice@example.com,Alice,Example Inc"></textarea></label>
+        <button type="submit">上传并创建名单</button></form>
+        <p class="muted">建议每次发送前上传一个独立名单。创建发送活动时选择名单，只会发送该名单里的邮箱。</p>
+        </section><section><h2>已上传名单</h2><table><thead><tr><th>名单</th><th>邮箱数</th><th>文件</th><th>上传时间</th><th>活动数</th><th>操作</th></tr></thead><tbody>' . ($listRows ?: '<tr><td colspan="6" class="muted">暂无名单，请先上传 txt/csv 文件</td></tr>') . '</tbody></table></section></div>');
     exit;
 }
 
@@ -268,11 +366,16 @@ if ($path === '/campaigns') {
     foreach ($templates as $template) {
         $options .= '<option value="' . e($template['id']) . '">' . e($template['name']) . '</option>';
     }
+    $lists = $pdo->query('select id, name, total_count from contact_lists order by id desc limit 100')->fetchAll();
+    $listOptions = '';
+    foreach ($lists as $list) {
+        $listOptions .= '<option value="' . e($list['id']) . '">#' . e($list['id']) . ' ' . e($list['name']) . '（' . e((string) $list['total_count']) . '）</option>';
+    }
     render_page('发送活动', '<div class="split"><section><h2>创建发送活动</h2><form method="post" action="/campaigns">
-        <label>活动名称<input name="name" required></label><label>模板<select name="template_id" required>' . $options . '</select></label>
-        <label>每封发送间隔秒数<input name="interval_seconds" type="number" min="1" value="60" required></label><button type="submit">创建活动</button></form>
-        <p class="muted">创建后会把联系人写入 MySQL 队列，Supervisor worker 逐封发送。</p></section>
-        <section><h2>活动实时进度</h2><table><thead><tr><th>活动</th><th>状态</th><th>间隔</th><th>进度</th><th>失败</th><th>操作</th></tr></thead><tbody id="campaign-body"></tbody></table></section></div>',
+        <label>活动名称<input name="name" required></label><label>联系人名单<select name="list_id" required><option value="">请选择上传过的名单</option>' . $listOptions . '</select></label><label>模板<select name="template_id" required>' . $options . '</select></label>
+        <label>每封发送间隔秒数<input name="interval_seconds" type="number" min="1" value="60" required></label><button type="submit">创建并开始发送</button></form>
+        <p class="muted">发送流程：先到“联系人”上传一个 txt/csv 名单，再在这里选择该名单创建活动。系统只会把这个名单里的未退订邮箱写入 MySQL 队列。</p></section>
+        <section><h2>最近 20 个活动</h2><table><thead><tr><th>活动</th><th>名单</th><th>状态</th><th>间隔</th><th>进度</th><th>失败</th><th>操作</th></tr></thead><tbody id="campaign-body"></tbody></table></section></div>',
         realtime_script(true)
     );
     exit;
@@ -344,14 +447,27 @@ async function refreshStatus() {
       const total = Number(c.total || 0);
       const sent = Number(c.sent || 0);
       const pct = total > 0 ? Math.round(sent * 100 / total) : 0;
-      const stop = includeStopButton ? `<td><form method="post" action="/campaigns/${esc(c.id)}/stop"><button class="secondary">停止</button></form></td>` : '';
+      const canStop = c.status === 'queued' || c.status === 'sending';
+      const canDelete = c.status === 'done' || c.status === 'stopped';
+      const actions = includeStopButton
+        ? `<td>${
+            canStop
+              ? `<form method="post" action="/campaigns/${esc(c.id)}/stop"><button class="secondary">停止</button></form>`
+              : ''
+          }${
+            canDelete
+              ? `<form method="post" action="/campaigns/${esc(c.id)}/delete" onsubmit="return confirm('删除后会同时清理这个活动的发送日志，确定删除？')"><button class="secondary" style="margin-top:6px;background:#b42318">删除</button></form>`
+              : ''
+          }${!canStop && !canDelete ? '<span class="muted">-</span>' : ''}</td>`
+        : '';
       return `<tr>
         <td>#${esc(c.id)} ${esc(c.name)}</td>
+        <td>${esc(c.list_name)}</td>
         <td class="status ${statusClass(c.status)}">${esc(c.status)}</td>
         <td>${esc(c.interval_seconds)} 秒</td>
         <td><div>${sent}/${total}（${pct}%）</div><div class="progress"><i style="width:${pct}%"></i></div></td>
         <td class="bad">${esc(c.failed)}</td>
-        ${stop}
+        ${actions}
       </tr>`;
     }).join('') || '<tr><td colspan="6" class="muted">暂无发送活动</td></tr>';
   }

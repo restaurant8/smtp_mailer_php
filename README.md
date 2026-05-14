@@ -12,7 +12,8 @@
 
 ## 功能
 
-- 批量导入联系人，支持 CSV 或每行一个邮箱。
+- 按“联系人名单”管理邮箱，每次上传 txt/csv 都生成一个独立名单。
+- 创建发送活动时必须选择一个名单，只发送该名单里的邮箱。
 - 自定义邮件模板，支持 HTML 和纯文本正文。
 - 创建发送活动并写入 MySQL 队列。
 - Supervisor worker 从队列逐封发送。
@@ -67,18 +68,10 @@ mysql -u smtp_mailer -p smtp_mailer < database/schema.sql
 
 也可以在 aaPanel 数据库管理里导入 `database/schema.sql`。
 
-如果你已经导入过旧版表结构，需要额外执行一次：
+如果你已经导入过旧版表结构，需要额外执行升级 SQL：
 
-```sql
-create table if not exists worker_status (
-  name varchar(100) primary key,
-  pid int unsigned null,
-  current_queue_id bigint unsigned null,
-  current_email varchar(255) null,
-  state varchar(50) not null default 'idle',
-  heartbeat_at datetime not null,
-  updated_at datetime not null default current_timestamp on update current_timestamp
-) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+```bash
+mysql -u smtp_mailer -p smtp_mailer < database/upgrade_contact_lists.sql
 ```
 
 ### 4. 配置项目
@@ -107,6 +100,11 @@ nano config.php
     'username' => '你的SMTP账号',
     'password' => '你的SMTP授权码',
     'encryption' => 'tls',
+    'timeout' => 30,
+    'auto_tls' => true,
+    'debug' => false,
+    'debug_log' => __DIR__ . '/storage/logs/smtp-debug.log',
+    'allow_self_signed' => false,
     'from_email' => '你的发件邮箱',
     'from_name' => '你的发件名称',
 ]
@@ -118,6 +116,36 @@ nano config.php
 'port' => 465,
 'encryption' => 'ssl',
 ```
+
+## SMTP 调试
+
+如果发送日志显示 `SMTP Error: Could not connect to SMTP host`，先确认服务器能连通 SMTP 端口：
+
+```bash
+nc -vz mail.example.com 587
+openssl s_client -starttls smtp -connect mail.example.com:587 -crlf
+```
+
+然后在 `config.php` 里临时打开调试：
+
+```php
+'debug' => true,
+'debug_log' => __DIR__ . '/storage/logs/smtp-debug.log',
+```
+
+重新创建一个测试发送活动后查看：
+
+```bash
+cat /www/wwwroot/smtp_mailer/storage/logs/smtp-debug.log
+```
+
+如果端口能通，但 PHP/PHPMailer 因证书问题连不上，可以临时测试：
+
+```php
+'allow_self_signed' => true,
+```
+
+这会关闭 SMTP 证书校验，只建议用于定位问题。长期方案应该修复邮件服务器证书，让 `allow_self_signed` 保持 `false`。
 
 ### 5. Nginx 伪静态
 
@@ -178,11 +206,37 @@ sleep(interval_seconds)
 ## 使用流程
 
 1. 打开后台首页。
-2. 导入联系人。
+2. 到 `联系人` 上传 txt/csv 名单。
 3. 检查或新建模板。
-4. 创建发送活动，设置发送间隔。
+4. 创建发送活动，选择要发送的名单，设置发送间隔。
 5. Supervisor worker 自动发送。
 6. 在 `发送日志` 页面查看逐封状态和失败原因。
+
+## 联系人名单
+
+联系人不再按“全局全部联系人”发送，而是按上传名单发送。
+
+示例：
+
+- 第一次上传 `A.txt`，里面 100 个邮箱，生成名单 `A`。
+- 用名单 `A` 创建活动，只发送这 100 个。
+- 第二次上传 `B.txt`，里面 50 个邮箱，生成名单 `B`。
+- 用名单 `B` 创建活动，只发送这 50 个，不会再发送名单 `A`。
+
+txt 格式：
+
+```text
+alice@example.com
+bob@example.com
+```
+
+csv 格式：
+
+```csv
+email,name,company
+alice@example.com,Alice,Example Inc
+bob@example.com,Bob,Example Inc
+```
 
 ## 实时监控
 
