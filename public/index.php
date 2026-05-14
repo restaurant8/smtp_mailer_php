@@ -344,14 +344,14 @@ async function refreshStatus() {
       const total = Number(c.total || 0);
       const sent = Number(c.sent || 0);
       const pct = total > 0 ? Math.round(sent * 100 / total) : 0;
-      const stop = includeStopButton ? `<td><form method="post" action="/campaigns/\${esc(c.id)}/stop"><button class="secondary">停止</button></form></td>` : '';
+      const stop = includeStopButton ? `<td><form method="post" action="/campaigns/${esc(c.id)}/stop"><button class="secondary">停止</button></form></td>` : '';
       return `<tr>
-        <td>#\${esc(c.id)} \${esc(c.name)}</td>
-        <td class="status \${statusClass(c.status)}">\${esc(c.status)}</td>
-        <td>\${esc(c.interval_seconds)} 秒</td>
-        <td><div>\${sent}/\${total}（\${pct}%）</div><div class="progress"><i style="width:\${pct}%"></i></div></td>
-        <td class="bad">\${esc(c.failed)}</td>
-        \${stop}
+        <td>#${esc(c.id)} ${esc(c.name)}</td>
+        <td class="status ${statusClass(c.status)}">${esc(c.status)}</td>
+        <td>${esc(c.interval_seconds)} 秒</td>
+        <td><div>${sent}/${total}（${pct}%）</div><div class="progress"><i style="width:${pct}%"></i></div></td>
+        <td class="bad">${esc(c.failed)}</td>
+        ${stop}
       </tr>`;
     }).join('') || '<tr><td colspan="6" class="muted">暂无发送活动</td></tr>';
   }
@@ -359,13 +359,13 @@ async function refreshStatus() {
   const logBody = document.getElementById('log-body');
   if (logBody) {
     logBody.innerHTML = (data.logs || []).map(row => `<tr>
-      <td>#\${esc(row.id)}</td>
-      <td>#\${esc(row.campaign_id)} \${esc(row.campaign_name)}</td>
-      <td>\${esc(row.email)}</td>
-      <td class="status \${statusClass(row.status)}">\${esc(row.status)}</td>
-      <td>\${esc(row.created_at || '')}</td>
-      <td>\${esc(row.sent_at || row.locked_at || '')}</td>
-      <td class="bad">\${esc(row.error || '')}</td>
+      <td>#${esc(row.id)}</td>
+      <td>#${esc(row.campaign_id)} ${esc(row.campaign_name)}</td>
+      <td>${esc(row.email)}</td>
+      <td class="status ${statusClass(row.status)}">${esc(row.status)}</td>
+      <td>${esc(row.created_at || '')}</td>
+      <td>${esc(row.sent_at || row.locked_at || '')}</td>
+      <td class="bad">${esc(row.error || '')}</td>
     </tr>`).join('') || '<tr><td colspan="7" class="muted">暂无发送日志</td></tr>';
   }
 }
