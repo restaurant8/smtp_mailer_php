@@ -157,7 +157,7 @@ function render_page(string $title, string $body, string $script = ''): void
     .card,section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.card span{display:block;color:var(--muted);font-size:13px}.card b{display:block;font-size:28px;margin-top:8px}
     .split{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}.notice{margin-bottom:16px;border:1px solid #a6d8ca;background:#e9f7f2;color:#09523f;border-radius:8px;padding:12px 14px}
     form{display:grid;gap:12px}label{display:grid;gap:6px;font-weight:600}input,textarea,select{width:100%;border:1px solid var(--line);border-radius:6px;padding:10px 12px;font:inherit;background:#fff}
-    textarea{min-height:150px;resize:vertical;font-family:Consolas,Menlo,monospace}button{border:0;border-radius:6px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:700;cursor:pointer}button.secondary{background:var(--blue)}
+    textarea{min-height:150px;resize:vertical;font-family:Consolas,Menlo,monospace}button,.button{border:0;border-radius:6px;padding:10px 14px;background:var(--brand);color:#fff;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}button.secondary{background:var(--blue)}
     table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{background:#f2f4f7;font-size:13px;color:#475467}
     .muted{color:var(--muted);font-size:14px}.status{font-weight:700}.ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
     .progress{height:10px;border-radius:999px;background:#eaecf0;overflow:hidden}.progress>i{display:block;height:100%;background:var(--brand);width:0%}
@@ -299,6 +299,13 @@ if ($path === '/templates' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $stmt = $pdo->prepare('insert into templates (name, subject, html_body, text_body) values (?, ?, ?, ?)');
     $stmt->execute([post_value('name'), post_value('subject'), post_value('html_body'), post_value('text_body')]);
     redirect_with_notice('/templates', '模板已保存');
+}
+
+if (preg_match('#^/templates/(\d+)/edit$#', $path, $matches) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $templateId = (int) $matches[1];
+    $stmt = $pdo->prepare('update templates set name = ?, subject = ?, html_body = ?, text_body = ? where id = ?');
+    $stmt->execute([post_value('name'), post_value('subject'), post_value('html_body'), post_value('text_body'), $templateId]);
+    redirect_with_notice('/templates', '模板已更新');
 }
 
 if (preg_match('#^/contact-lists/(\d+)/delete$#', $path, $matches) && $_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -458,13 +465,33 @@ if ($path === '/templates') {
     $rows = $pdo->query('select * from templates order by id')->fetchAll();
     $bodyRows = '';
     foreach ($rows as $row) {
-        $bodyRows .= '<tr><td>#' . e($row['id']) . '</td><td>' . e($row['name']) . '</td><td>' . e($row['subject']) . '</td></tr>';
+        $bodyRows .= '<tr><td>#' . e($row['id']) . '</td><td>' . e($row['name']) . '</td><td>' . e($row['subject']) . '</td><td><a class="button" href="/templates/' . e($row['id']) . '/edit">编辑</a></td></tr>';
     }
     render_page('模板', '<div class="split"><section><h2>新建模板</h2><form method="post" action="/templates">
         <label>模板名称<input name="name" required></label><label>标题<input name="subject" required></label>
         <label>HTML 正文<textarea name="html_body" required></textarea></label><label>纯文本正文<textarea name="text_body" required></textarea></label>
         <button type="submit">保存模板</button></form><p class="muted">可用变量：{{email}}、{{name}}、{{company}}、{{sender_name}}、{{unsubscribe_url}}</p></section>
-        <section><h2>已有模板</h2><table><thead><tr><th>ID</th><th>名称</th><th>标题</th></tr></thead><tbody>' . $bodyRows . '</tbody></table></section></div>');
+        <section><h2>已有模板</h2><table><thead><tr><th>ID</th><th>名称</th><th>标题</th><th>操作</th></tr></thead><tbody>' . $bodyRows . '</tbody></table></section></div>');
+    exit;
+}
+
+if (preg_match('#^/templates/(\d+)/edit$#', $path, $matches)) {
+    $stmt = $pdo->prepare('select * from templates where id = ?');
+    $stmt->execute([(int) $matches[1]]);
+    $template = $stmt->fetch();
+    if (!$template) {
+        http_response_code(404);
+        render_page('模板不存在', '<section><h2>模板不存在</h2></section>');
+        exit;
+    }
+
+    render_page('编辑模板', '<section><h2>编辑模板 #' . e($template['id']) . '</h2><form method="post" action="/templates/' . e($template['id']) . '/edit">
+        <label>模板名称<input name="name" value="' . e($template['name']) . '" required></label>
+        <label>标题<input name="subject" value="' . e($template['subject']) . '" required></label>
+        <label>HTML 正文<textarea name="html_body" required>' . e($template['html_body']) . '</textarea></label>
+        <label>纯文本正文<textarea name="text_body" required>' . e($template['text_body']) . '</textarea></label>
+        <button type="submit">保存修改</button>
+        </form><p class="muted"><a href="/templates">返回模板列表</a></p></section>');
     exit;
 }
 
