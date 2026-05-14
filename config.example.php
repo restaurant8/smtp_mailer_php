@@ -4,6 +4,12 @@ return [
     'app_url' => 'https://mail.example.com',
     'app_secret' => 'change-this-long-random-secret',
 
+    'admin' => [
+        'username' => 'admin',
+        // Generate with: php -r "echo password_hash('your-password', PASSWORD_DEFAULT), PHP_EOL;"
+        'password_hash' => '$2y$10$replace_this_hash_before_deploying',
+    ],
+
     'db' => [
         'host' => '127.0.0.1',
         'port' => 3306,

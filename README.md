@@ -88,6 +88,11 @@ nano config.php
 'app_url' => 'https://你的域名',
 'app_secret' => '改成很长的随机字符串',
 
+'admin' => [
+    'username' => 'admin',
+    'password_hash' => '用下面命令生成',
+],
+
 'db' => [
     'database' => 'smtp_mailer',
     'username' => 'smtp_mailer',
@@ -109,6 +114,23 @@ nano config.php
     'from_name' => '你的发件名称',
 ]
 ```
+
+生成后台登录密码 hash：
+
+```bash
+php -r "echo password_hash('你的强密码', PASSWORD_DEFAULT), PHP_EOL;"
+```
+
+把输出填到 `config.php`：
+
+```php
+'admin' => [
+    'username' => 'admin',
+    'password_hash' => '$2y$10$...',
+],
+```
+
+后台所有页面和 `/api/status` 都需要登录。退订链接 `/unsubscribe` 会保持公开可访问。
 
 465 端口通常这样：
 

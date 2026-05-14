@@ -3,6 +3,12 @@
 require_once __DIR__ . '/../app/db.php';
 require_once __DIR__ . '/../app/helpers.php';
 
+session_start([
+    'cookie_httponly' => true,
+    'cookie_samesite' => 'Lax',
+    'cookie_secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+]);
+
 $pdo = db();
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?: '/';
 
@@ -93,6 +99,49 @@ function json_response(array $payload): never
     exit;
 }
 
+function is_logged_in(): bool
+{
+    return !empty($_SESSION['admin_logged_in']);
+}
+
+function verify_admin_login(string $username, string $password): bool
+{
+    $admin = config()['admin'] ?? [];
+    $expectedUser = (string) ($admin['username'] ?? 'admin');
+    if (!hash_equals($expectedUser, $username)) {
+        return false;
+    }
+
+    if (!empty($admin['password_hash'])) {
+        return password_verify($password, (string) $admin['password_hash']);
+    }
+
+    if (!empty($admin['password'])) {
+        return hash_equals((string) $admin['password'], $password);
+    }
+
+    return false;
+}
+
+function render_login(string $error = ''): never
+{
+    $errorHtml = $error !== '' ? '<div class="notice" style="border-color:#fda29b;background:#fef3f2;color:#b42318">' . e($error) . '</div>' : '';
+    echo '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">';
+    echo '<title>登录 - SMTP Mailer</title><style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f5f7f8;color:#101828;font-family:Inter,Segoe UI,Arial,sans-serif}
+    section{width:min(420px,calc(100vw - 32px));background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:24px}
+    h1{margin:0 0 18px;font-size:24px}form{display:grid;gap:14px}label{display:grid;gap:6px;font-weight:600}
+    input{width:100%;border:1px solid #d0d5dd;border-radius:6px;padding:10px 12px;font:inherit}button{border:0;border-radius:6px;padding:11px 14px;background:#176b5b;color:#fff;font-weight:700;cursor:pointer}
+    .notice{margin-bottom:14px;border:1px solid #a6d8ca;background:#e9f7f2;color:#09523f;border-radius:8px;padding:12px 14px}
+    .muted{color:#667085;font-size:14px}
+    </style></head><body><section>' . $errorHtml . '<h1>SMTP Mailer 登录</h1><form method="post" action="/login">
+    <label>用户名<input name="username" autocomplete="username" required></label>
+    <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">登录</button>
+    </form><p class="muted">后台包含 SMTP 发信能力，请不要公开账号密码。</p></section></body></html>';
+    exit;
+}
+
 function render_page(string $title, string $body, string $script = ''): void
 {
     $notice = isset($_GET['notice']) ? '<div class="notice">' . e($_GET['notice']) . '</div>' : '';
@@ -114,8 +163,42 @@ function render_page(string $title, string $body, string $script = ''): void
     .progress{height:10px;border-radius:999px;background:#eaecf0;overflow:hidden}.progress>i{display:block;height:100%;background:var(--brand);width:0%}
     @media(max-width:900px){.grid,.split{grid-template-columns:1fr}nav strong{width:100%;margin-right:0}}
     </style></head><body>';
-    echo '<header><nav><strong>SMTP Mailer</strong><a href="/">控制台</a><a href="/contacts">联系人</a><a href="/templates">模板</a><a href="/campaigns">发送活动</a><a href="/logs">发送日志</a><a href="/settings">配置</a></nav></header>';
+    echo '<header><nav><strong>SMTP Mailer</strong><a href="/">控制台</a><a href="/contacts">联系人</a><a href="/templates">模板</a><a href="/campaigns">发送活动</a><a href="/logs">发送日志</a><a href="/settings">配置</a><a href="/logout">退出</a></nav></header>';
     echo '<main>' . $notice . $body . '</main>' . $script . '</body></html>';
+}
+
+if ($path === '/login') {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if (verify_admin_login(post_value('username'), post_value('password'))) {
+            session_regenerate_id(true);
+            $_SESSION['admin_logged_in'] = true;
+            $_SESSION['admin_username'] = post_value('username');
+            header('Location: /', true, 303);
+            exit;
+        }
+        render_login('用户名或密码错误');
+    }
+    render_login();
+}
+
+if ($path === '/logout') {
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+    }
+    session_destroy();
+    header('Location: /login', true, 303);
+    exit;
+}
+
+if (!is_logged_in() && $path !== '/unsubscribe') {
+    if (str_starts_with($path, '/api/')) {
+        http_response_code(401);
+        json_response(['ok' => false, 'error' => 'login_required']);
+    }
+    header('Location: /login', true, 303);
+    exit;
 }
 
 if ($path === '/api/status') {
