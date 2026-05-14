@@ -229,6 +229,31 @@ if (preg_match('#^/contact-lists/(\d+)/delete$#', $path, $matches) && $_SERVER['
     redirect_with_notice('/contacts', '名单已删除');
 }
 
+if ($path === '/contact-lists/bulk-delete' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $listIds = array_map('intval', (array) ($_POST['list_ids'] ?? []));
+    $listIds = array_values(array_filter(array_unique($listIds), fn (int $id) => $id > 0));
+    if (!$listIds) {
+        redirect_with_notice('/contacts', '请先选择要删除的名单');
+    }
+
+    $deleted = 0;
+    $skipped = 0;
+    $inUse = $pdo->prepare("select count(*) from campaigns where list_id = ? and status in ('queued','sending')");
+    $delete = $pdo->prepare('delete from contact_lists where id = ?');
+
+    foreach ($listIds as $listId) {
+        $inUse->execute([$listId]);
+        if ((int) $inUse->fetchColumn() > 0) {
+            $skipped++;
+            continue;
+        }
+        $delete->execute([$listId]);
+        $deleted += $delete->rowCount();
+    }
+
+    redirect_with_notice('/contacts', "已删除 {$deleted} 个名单，跳过 {$skipped} 个正在发送的名单");
+}
+
 if ($path === '/campaigns' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $templateId = (int) post_value('template_id');
     $listId = (int) post_value('list_id');
@@ -333,7 +358,7 @@ if ($path === '/contacts') {
         from contact_lists l order by l.id desc limit 100")->fetchAll();
     $listRows = '';
     foreach ($lists as $list) {
-        $listRows .= '<tr><td>#' . e($list['id']) . ' ' . e($list['name']) . '</td><td>' . e((string) $list['total_count']) . '</td><td>' . e($list['filename']) . '</td><td>' . e($list['created_at']) . '</td><td>' . e((string) $list['campaign_count']) . '</td><td><form method="post" action="/contact-lists/' . e($list['id']) . '/delete" onsubmit="return confirm(\'确定删除这个名单？不会删除历史发送日志。\')"><button class="secondary" style="background:#b42318">删除名单</button></form></td></tr>';
+        $listRows .= '<tr><td><input type="checkbox" name="list_ids[]" value="' . e($list['id']) . '" class="list-check"></td><td>#' . e($list['id']) . ' ' . e($list['name']) . '</td><td>' . e((string) $list['total_count']) . '</td><td>' . e($list['filename']) . '</td><td>' . e($list['created_at']) . '</td><td>' . e((string) $list['campaign_count']) . '</td><td><form method="post" action="/contact-lists/' . e($list['id']) . '/delete" onsubmit="return confirm(\'确定删除这个名单？不会删除历史发送日志。\')"><button class="secondary" style="background:#b42318">删除名单</button></form></td></tr>';
     }
     render_page('联系人名单', '<div class="split"><section><h2>上传名单</h2><form method="post" action="/contacts/import" enctype="multipart/form-data">
         <label>名单名称<input name="list_name" placeholder="例如：5月第一批客户" required></label>
@@ -342,7 +367,7 @@ if ($path === '/contacts') {
         <label>也可以粘贴邮箱列表或 CSV<textarea name="contacts" placeholder="email,name,company&#10;alice@example.com,Alice,Example Inc"></textarea></label>
         <button type="submit">上传并创建名单</button></form>
         <p class="muted">建议每次发送前上传一个独立名单。创建发送活动时选择名单，只会发送该名单里的邮箱。</p>
-        </section><section><h2>已上传名单</h2><table><thead><tr><th>名单</th><th>邮箱数</th><th>文件</th><th>上传时间</th><th>活动数</th><th>操作</th></tr></thead><tbody>' . ($listRows ?: '<tr><td colspan="6" class="muted">暂无名单，请先上传 txt/csv 文件</td></tr>') . '</tbody></table></section></div>');
+        </section><section><h2>已上传名单</h2><form method="post" action="/contact-lists/bulk-delete" onsubmit="return confirm(\'确定删除选中的名单？不会删除历史发送日志，正在发送的名单会自动跳过。\')"><div class="toolbar"><label style="display:flex;gap:8px;align-items:center;font-weight:600"><input type="checkbox" id="select-all-lists"> 全选</label><button type="submit" class="secondary" style="background:#b42318">批量删除</button></div><table><thead><tr><th></th><th>名单</th><th>邮箱数</th><th>文件</th><th>上传时间</th><th>活动数</th><th>操作</th></tr></thead><tbody>' . ($listRows ?: '<tr><td colspan="7" class="muted">暂无名单，请先上传 txt/csv 文件</td></tr>') . '</tbody></table></form></section></div><script>const all=document.getElementById("select-all-lists");if(all){all.addEventListener("change",()=>document.querySelectorAll(".list-check").forEach(c=>c.checked=all.checked));}</script>');
     exit;
 }
 
