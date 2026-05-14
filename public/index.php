@@ -203,6 +203,11 @@ if (!is_logged_in() && $path !== '/unsubscribe') {
 
 if ($path === '/api/status') {
     $campaignId = isset($_GET['campaign_id']) && $_GET['campaign_id'] !== '' ? (int) $_GET['campaign_id'] : null;
+    $logStatus = isset($_GET['log_status']) ? trim((string) $_GET['log_status']) : '';
+    $allowedLogStatuses = ['queued', 'processing', 'sent', 'failed', 'skipped'];
+    if (!in_array($logStatus, $allowedLogStatuses, true)) {
+        $logStatus = '';
+    }
     $stats = queue_stats($pdo);
     $worker = worker_info($pdo);
     $campaigns = query_rows($pdo, "select c.id, c.name, c.status, c.interval_seconds, coalesce(l.name, '-') as list_name,
@@ -213,15 +218,20 @@ if ($path === '/api/status') {
         from campaigns c left join contact_lists l on l.id = c.list_id order by c.id desc limit 20");
 
     $params = [];
-    $where = '';
+    $whereParts = [];
     if ($campaignId) {
-        $where = 'where q.campaign_id = ?';
+        $whereParts[] = 'q.campaign_id = ?';
         $params[] = $campaignId;
     }
+    if ($logStatus !== '') {
+        $whereParts[] = 'q.status = ?';
+        $params[] = $logStatus;
+    }
+    $where = $whereParts ? 'where ' . implode(' and ', $whereParts) : '';
     $logs = query_rows($pdo, "select q.id, q.campaign_id, c.name as campaign_name, q.email, q.status, q.error, q.created_at, q.locked_at, q.sent_at
         from send_queue q join campaigns c on c.id = q.campaign_id
         {$where}
-        order by q.id desc limit 30", $params);
+        order by q.id desc limit 100", $params);
 
     json_response([
         'ok' => true,
@@ -518,6 +528,18 @@ if ($path === '/campaigns') {
 
 if ($path === '/logs') {
     render_page('发送日志', '<section><div class="toolbar"><h2 style="margin:0">发送日志</h2><span class="muted" id="last-refresh">等待刷新</span></div>
+        <div class="toolbar">
+          <label style="display:flex;gap:8px;align-items:center;font-weight:600">状态筛选
+            <select id="log-status-filter" style="width:auto;min-width:140px">
+              <option value="">全部</option>
+              <option value="sent">成功 sent</option>
+              <option value="failed">失败 failed</option>
+              <option value="processing">处理中 processing</option>
+              <option value="queued">待发送 queued</option>
+              <option value="skipped">跳过 skipped</option>
+            </select>
+          </label>
+        </div>
         <table><thead><tr><th>ID</th><th>活动</th><th>邮箱</th><th>状态</th><th>入队时间</th><th>发送时间</th><th>失败原因</th></tr></thead><tbody id="log-body"></tbody></table></section>',
         realtime_script()
     );
@@ -556,7 +578,11 @@ function statusClass(status) {
   return '';
 }
 async function refreshStatus() {
-  const res = await fetch('/api/status', {headers: {'Accept': 'application/json'}});
+  const params = new URLSearchParams();
+  const logStatusFilter = document.getElementById('log-status-filter');
+  if (logStatusFilter && logStatusFilter.value) params.set('log_status', logStatusFilter.value);
+  const query = params.toString();
+  const res = await fetch('/api/status' + (query ? '?' + query : ''), {headers: {'Accept': 'application/json'}});
   const data = await res.json();
   const stats = data.stats || {};
   for (const key of ['contacts','queued','processing','sent','failed','skipped']) {
@@ -621,6 +647,8 @@ async function refreshStatus() {
   }
 }
 refreshStatus().catch(console.error);
+const logStatusFilter = document.getElementById('log-status-filter');
+if (logStatusFilter) logStatusFilter.addEventListener('change', () => refreshStatus().catch(console.error));
 setInterval(() => refreshStatus().catch(console.error), 2000);
 </script>
 HTML);
